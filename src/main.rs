@@ -8,21 +8,21 @@ mod chain_spec;
 mod service;
 mod cli;
 
-pub use substrate_cli::{VersionInfo, IntoExit, error};
+pub use substrate_cli::{error, IntoExit, VersionInfo};
 
 fn main() {
-	let version = VersionInfo {
-		name: "Kulupu",
-		commit: env!("VERGEN_SHA_SHORT"),
-		version: env!("CARGO_PKG_VERSION"),
-		executable_name: "kulupu",
-		author: "Wei Tang <hi@that.world>",
-		description: "Kulupu node implementation",
-		support_url: "https://github.com/kulupu/kulupu/issues",
-	};
+    let version = VersionInfo {
+        name: "Kulupu",
+        commit: env!("VERGEN_SHA_SHORT"),
+        version: env!("CARGO_PKG_VERSION"),
+        executable_name: "kulupu",
+        author: "Wei Tang <hi@that.world>",
+        description: "Kulupu node implementation",
+        support_url: "https://github.com/kulupu/kulupu/issues",
+    };
 
-	if let Err(e) = cli::run(::std::env::args(), cli::Exit, version) {
-		eprintln!("Fatal error: {}\n\n{:?}", e, e);
-		std::process::exit(1)
-	}
+    if let Err(e) = cli::run(::std::env::args(), cli::Exit, version) {
+        eprintln!("Fatal error: {}\n\n{:?}", e, e);
+        std::process::exit(1)
+    }
 }
