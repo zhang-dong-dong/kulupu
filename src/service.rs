@@ -14,6 +14,13 @@ use substrate_service::{
     error::Error as ServiceError, AbstractService, Configuration, ServiceBuilder,
 };
 use transaction_pool::{self, txpool::Pool as TransactionPool};
+use std::{thread, time};
+use std::cell::RefCell;
+use jsonrpc_core::{
+    futures, futures::future::Future, Error, ErrorCode, MetaIoHandler, Params, Value,BoxFuture
+};
+use jsonrpc_pubsub::{PubSubHandler, Session, Subscriber, SubscriptionId, Sink};
+use jsonrpc_ws_server::{RequestContext, ServerBuilder};
 
 // Our native executor instance.
 native_executor_instance!(
@@ -102,7 +109,7 @@ macro_rules! new_full_start {
             let import_queue = consensus_pow::import_queue(
                 Box::new(client.clone()),
                 client.clone(),
-                kulupu_pow::RandomXAlgorithm::new(client.clone(), 0),
+                kulupu_pow::RandomXAlgorithm::new(client.clone(), Sink::default()),
                 0,
                 select_chain,
                 inherent_data_providers.clone(),
@@ -131,7 +138,7 @@ pub fn new_full<C: Send + Default + 'static>(
         .with_network_protocol(|_| Ok(NodeProtocol::new()))?
         .with_finality_proof_provider(|_client, _backend| Ok(Arc::new(()) as _))?
         .build()?;
-
+    let web_sink = new_web_server(miner_listen_port).unwrap();
     if is_authority {
         for _ in 0..threads {
             let proposer = basic_authorship::ProposerFactory {
@@ -142,7 +149,7 @@ pub fn new_full<C: Send + Default + 'static>(
             consensus_pow::start_mine(
                 Box::new(service.client().clone()),
                 service.client(),
-                kulupu_pow::RandomXAlgorithm::new(service.client(), 8011),
+                kulupu_pow::RandomXAlgorithm::new(service.client(), web_sink),
                 proposer,
                 None,
                 round,
@@ -190,4 +197,70 @@ pub fn new_light<C: Send + Default + 'static>(
         .with_finality_proof_provider(|_client, _backend| Ok(Arc::new(()) as _))?
         .with_network_protocol(|_| Ok(NodeProtocol::new()))?
         .build()
+}
+
+fn new_web_server(port: u32) ->Result<Sink, &'static str>{
+    let mut sink_params;
+    let mut sink_seal;
+
+    let mut io = PubSubHandler::new(MetaIoHandler::default());
+    io.add_method("add_method mine_params", |_params: Params| {
+        Ok(Value::String("hello".to_string()))
+    });
+    io.add_subscription(
+        "mine_params",
+        (
+            "sub_get_mine_params",
+            move |params: Params, _, subscriber: Subscriber| {
+                println!("new_miner_server mine_params");
+
+                if params != Params::None {
+                    subscriber
+                        .reject(Error {
+                            code: ErrorCode::ParseError,
+                            message: "Invalid parameters. Subscription rejected.".into(),
+                            data: None,
+                        })
+                        .unwrap();
+                    return;
+                }
+                sink_params = subscriber
+                        .assign_id_async(SubscriptionId::Number(5))
+                        .wait()
+                        .unwrap();
+                    println!("new_miner_server notify");
+
+            },
+        ),
+        ("remove_get_mine_params", |_id: SubscriptionId, _| {
+            println!("Closing subscription");
+            futures::future::ok(Value::Bool(true))
+        }),
+    );
+    io.add_subscription(
+        "raw_seal",
+        (
+            "pub_raw_seal",
+            move |params: Params, _, subscriber: Subscriber| {
+                println!("raw_seal:{:?}", params);
+                 sink_seal = subscriber
+                        .assign_id_async(SubscriptionId::Number(5))
+                        .wait()
+                        .unwrap();
+            },
+        ),
+        ("remove_get_info", |_id: SubscriptionId, _| {
+            println!("Closing subscription");
+            futures::future::ok(Value::Bool(true))
+        }),
+    );
+    let server = ServerBuilder::with_meta_extractor(io, |context: &RequestContext| {
+        Arc::new(Session::new(context.sender()))
+    })
+        .start(&"127.0.0.1:8011".parse().unwrap())
+        .expect("Unable to start RPC server");
+    thread::spawn(move || {
+        server.wait()
+    });
+    Ok(sink_params)
 }

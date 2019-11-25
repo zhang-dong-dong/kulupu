@@ -18,7 +18,7 @@ use hex::{encode, ToHex};
 use jsonrpc_core::{
     futures, futures::future::Future, Error, ErrorCode, MetaIoHandler, Params, Value,BoxFuture
 };
-use jsonrpc_pubsub::{PubSubHandler, Session, Subscriber, SubscriptionId};
+use jsonrpc_pubsub::{PubSubHandler, Session, Subscriber, SubscriptionId, Sink};
 use jsonrpc_ws_server::{RequestContext, ServerBuilder};
 use serde_json::json;
 use std::{thread, time};
@@ -127,12 +127,12 @@ where
 
 pub struct RandomXAlgorithm<C> {
     client: Arc<C>,
-    port: u32,
+    sink: Sink,
 }
 
 impl<C> RandomXAlgorithm<C> {
-    pub fn new(client: Arc<C>, port: u32) -> Self {
-        Self { client, port }
+    pub fn new(client: Arc<C>, sink: Sink) -> Self {
+        Self { client, sink }
     }
 }
 
@@ -204,7 +204,6 @@ where
         let mut rng = SmallRng::from_rng(&mut thread_rng())
             .map_err(|e| format!("Initialize RNG failed for mining: {:?}", e))?;
         let key_hash = key_hash(self.client.as_ref(), parent)?;
-        println!("new_miner_server : {:?}", self.port);
         /*
                 for _ in 0..round {
                     let nonce = H256::random_using(&mut rng);
@@ -223,6 +222,7 @@ where
                     }
                 }
         */
+/*
         let v = json!({ "round": round, "key_hash": key_hash, "pre_hash": *pre_hash, "difficulty": difficulty});
         let mut map_params = serde_json::Map::new();
         map_params.insert("round".to_string(), Value::String(round.to_string()));
@@ -244,6 +244,7 @@ where
         io.add_method("add_method mine_params", |_params: Params| {
             Ok(Value::String("hello".to_string()))
         });
+
         io.add_subscription(
             "mine_params",
             (
@@ -295,8 +296,6 @@ where
 							.assign_id_async(SubscriptionId::Number(5))
 							.wait()
 							.unwrap();
-						// or subscriber.reject(Error {} );
-						// or drop(subscriber)
 
 						loop {
 							thread::sleep(time::Duration::from_millis(1000));
@@ -326,6 +325,7 @@ where
         .start(&"127.0.0.1:8011".parse().unwrap())
         .expect("Unable to start RPC server");
         server.wait();
+*/
         Ok(None)
     }
 }
