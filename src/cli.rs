@@ -42,12 +42,12 @@ where
 
                 let runtime = Runtime::new().map_err(|e| format!("{:?}", e))?;
                 match config.roles {
-                    ServiceRoles::LIGHT => run_until_exit(
-                        runtime,
-                        service::new_light(config, custom_args.author.as_ref().map(|s| s.as_str()))
-                            .map_err(|e| format!("{:?}", e))?,
-                        exit,
-                    ),
+//                    ServiceRoles::LIGHT => run_until_exit(
+//                        runtime,
+//                        service::new_light(config, custom_args.author.as_ref().map(|s| s.as_str()))
+//                            .map_err(|e| format!("{:?}", e))?,
+//                        exit,
+//                    ),
                     _ => run_until_exit(
                         runtime,
                         service::new_full(
@@ -65,21 +65,25 @@ where
             })
         }
         ParseAndPrepare::BuildSpec(cmd) => cmd.run(load_spec),
-        ParseAndPrepare::ExportBlocks(cmd) => cmd.run_with_builder::<(), _, _, _, _, _, _>(
-            |config| Ok(new_full_start!(config, None).0),
-            load_spec,
-            exit,
-        ),
-        ParseAndPrepare::ImportBlocks(cmd) => cmd.run_with_builder::<(), _, _, _, _, _, _>(
-            |config| Ok(new_full_start!(config, None).0),
-            load_spec,
-            exit,
-        ),
-        ParseAndPrepare::PurgeChain(cmd) => cmd.run(load_spec),
-        ParseAndPrepare::RevertChain(cmd) => cmd.run_with_builder::<(), _, _, _, _, _>(
-            |config| Ok(new_full_start!(config, None).0),
-            load_spec,
-        ),
+//        ParseAndPrepare::ExportBlocks(cmd) => cmd.run_with_builder::<(), _, _, _, _, _, _>(
+//            |config| Ok(new_full_start!(config, None).0),
+//            load_spec,
+//            exit,
+//        ),
+//        ParseAndPrepare::ImportBlocks(cmd) => cmd.run_with_builder::<(), _, _, _, _, _, _>(
+//            |config| Ok(new_full_start!(config, None).0),
+//            load_spec,
+//            exit,
+//        ),
+//        ParseAndPrepare::PurgeChain(cmd) => cmd.run(load_spec),
+//        ParseAndPrepare::RevertChain(cmd) => cmd.run_with_builder::<(), _, _, _, _, _>(
+//            |config| Ok(new_full_start!(config, None).0),
+//            load_spec,
+//        ),
+        ParseAndPrepare::RevertChain(_) => Ok(()),
+        ParseAndPrepare::ExportBlocks(_) => Ok(()),
+        ParseAndPrepare::ImportBlocks(_) => Ok(()),
+        ParseAndPrepare::PurgeChain(_) => Ok(()),
         ParseAndPrepare::CustomCommand(_) => Ok(()),
     }?;
 

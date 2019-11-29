@@ -6,21 +6,27 @@ use network::{config::DummyFinalityProofRequestBuilder, construct_simple_protoco
 use primitives::H256;
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::net::SocketAddr;
 use substrate_client::LongestChain;
 use substrate_executor::native_executor_instance;
 pub use substrate_executor::NativeExecutor;
 use substrate_service::{
-    error::Error as ServiceError, AbstractService, Configuration, ServiceBuilder,
+    error::Error as ServiceError, AbstractService, Configuration,
 };
 use transaction_pool::{self, txpool::Pool as TransactionPool};
-use std::{thread, time};
-use std::cell::RefCell;
+use std::{thread, time::Duration};
 use jsonrpc_core::{
-    futures, futures::future::Future, Error, ErrorCode, MetaIoHandler, Params, Value,BoxFuture
+    futures, futures::future::Future, MetaIoHandler, Params, Value, futures::stream::Stream
 };
-use jsonrpc_pubsub::{PubSubHandler, Session, Subscriber, SubscriptionId, Sink};
+use jsonrpc_pubsub::{PubSubHandler, Session, Subscriber, SubscriptionId};
 use jsonrpc_ws_server::{RequestContext, ServerBuilder};
+use std::sync::{Arc, Mutex, mpsc::{Sender, Receiver, channel}};
+use hex;
+
+pub const MINE_PARAMS: &str = "mine_params";
+pub const SUB_GET_MINE_PARAMS: &str = "sub_get_mine_params";
+pub const RAWSEAL_METHOD: &str = "raw_seal";
+pub const PUB_RAW_SEAL: &str = "pub_raw_seal";
 
 // Our native executor instance.
 native_executor_instance!(
@@ -87,15 +93,65 @@ pub fn kulupu_inherent_data_providers(
 ///
 /// Use this macro if you don't actually need the full service, but just the builder in order to
 /// be able to perform chain operations.
-macro_rules! new_full_start {
-    ($config:expr, $author:expr) => {{
-        let inherent_data_providers = crate::service::kulupu_inherent_data_providers($author)?;
+//macro_rules! new_full_start {
+//    ($config:expr, $author:expr) => {{
+//        let inherent_data_providers = crate::service::kulupu_inherent_data_providers($author)?;
+//
+//        let builder = substrate_service::ServiceBuilder::new_full::<
+//            kulupu_runtime::opaque::Block,
+//            kulupu_runtime::RuntimeApi,
+//            crate::service::Executor,
+//        >($config)?
+//        .with_select_chain(|_config, backend| {
+//            Ok(substrate_client::LongestChain::new(backend.clone()))
+//        })?
+//        .with_transaction_pool(|config, client| {
+//            Ok(transaction_pool::txpool::Pool::new(
+//                config,
+//                transaction_pool::FullChainApi::new(client),
+//            ))
+//        })?
+//        .with_import_queue(|_config, client, select_chain, _transaction_pool| {
+//            let import_queue = consensus_pow::import_queue(
+//                Box::new(client.clone()),
+//                client.clone(),
+//                kulupu_pow::RandomXAlgorithm::new(client.clone(), {"".to_string(),["".to_string()]}, {0}),
+//                0,
+//                select_chain,
+//                inherent_data_providers.clone(),
+//            )?;
+//
+//            Ok(import_queue)
+//        })?;
+//
+//        (builder, inherent_data_providers)
+//    }};
+//}
 
-        let builder = substrate_service::ServiceBuilder::new_full::<
+/// Builds a new service for a full client.
+pub fn new_full<C: Send + Default + 'static>(
+    config: Configuration<C, GenesisConfig>,
+    author: Option<&str>,
+    threads: usize,
+    round: u32,
+    miner_listen_port: u32,
+) -> Result<impl AbstractService, ServiceError> {
+    let is_authority = config.roles.is_authority();
+    let inherent_data_providers = crate::service::kulupu_inherent_data_providers(author)?;
+    let (tx1, rx1)= channel();
+    let tx1 = Arc::new(Mutex::new(tx1));
+    let rx1 = Arc::new(Mutex::new(rx1));
+    let (tx2, rx2)= channel();
+    let tx2 = Arc::new(Mutex::new(tx2));
+    let rx2 = Arc::new(Mutex::new(rx2));
+    let (tx, rx)= channel();
+    let rx = Arc::new(Mutex::new(rx));
+    let tx = Arc::new(Mutex::new(tx));
+    let builder = substrate_service::ServiceBuilder::new_full::<
             kulupu_runtime::opaque::Block,
             kulupu_runtime::RuntimeApi,
             crate::service::Executor,
-        >($config)?
+        >(config)?
         .with_select_chain(|_config, backend| {
             Ok(substrate_client::LongestChain::new(backend.clone()))
         })?
@@ -109,7 +165,7 @@ macro_rules! new_full_start {
             let import_queue = consensus_pow::import_queue(
                 Box::new(client.clone()),
                 client.clone(),
-                kulupu_pow::RandomXAlgorithm::new(client.clone(), Sink::default()),
+                kulupu_pow::RandomXAlgorithm::new(client.clone(), tx, rx),
                 0,
                 select_chain,
                 inherent_data_providers.clone(),
@@ -118,149 +174,104 @@ macro_rules! new_full_start {
             Ok(import_queue)
         })?;
 
-        (builder, inherent_data_providers)
-    }};
-}
-
-/// Builds a new service for a full client.
-pub fn new_full<C: Send + Default + 'static>(
-    config: Configuration<C, GenesisConfig>,
-    author: Option<&str>,
-    threads: usize,
-    round: u32,
-    miner_listen_port: u32,
-) -> Result<impl AbstractService, ServiceError> {
-    let is_authority = config.roles.is_authority();
-
-    let (builder, inherent_data_providers) = new_full_start!(config, author);
 
     let service = builder
         .with_network_protocol(|_| Ok(NodeProtocol::new()))?
         .with_finality_proof_provider(|_client, _backend| Ok(Arc::new(()) as _))?
         .build()?;
-    let web_sink = new_web_server(miner_listen_port).unwrap();
+    new_web_server(miner_listen_port, tx2.clone(), rx1);
     if is_authority {
-        for _ in 0..threads {
-            let proposer = basic_authorship::ProposerFactory {
-                client: service.client(),
-                transaction_pool: service.transaction_pool(),
-            };
 
-            consensus_pow::start_mine(
-                Box::new(service.client().clone()),
-                service.client(),
-                kulupu_pow::RandomXAlgorithm::new(service.client(), web_sink),
-                proposer,
-                None,
-                round,
-                service.network(),
-                std::time::Duration::new(2, 0),
-                service.select_chain().map(|v| v.clone()),
-                inherent_data_providers.clone(),
-            );
-        }
+        let proposer = basic_authorship::ProposerFactory {
+            client: service.client(),
+            transaction_pool: service.transaction_pool(),
+        };
+
+        consensus_pow::start_mine(
+            Box::new(service.client().clone()),
+            service.client(),
+            kulupu_pow::RandomXAlgorithm::new(service.client(), tx1.clone(), rx2),
+            proposer,
+            None,
+            round,
+            service.network(),
+            std::time::Duration::new(2, 0),
+            service.select_chain().map(|v| v.clone()),
+            inherent_data_providers.clone(),
+        );
     }
 
     Ok(service)
 }
 
-/// Builds a new service for a light client.
-pub fn new_light<C: Send + Default + 'static>(
-    config: Configuration<C, GenesisConfig>,
-    author: Option<&str>,
-) -> Result<impl AbstractService, ServiceError> {
-    let inherent_data_providers = kulupu_inherent_data_providers(author)?;
-
-    ServiceBuilder::new_light::<Block, RuntimeApi, Executor>(config)?
-        .with_select_chain(|_config, backend| Ok(LongestChain::new(backend.clone())))?
-        .with_transaction_pool(|config, client| {
-            Ok(TransactionPool::new(
-                config,
-                transaction_pool::FullChainApi::new(client),
-            ))
-        })?
-        .with_import_queue_and_fprb(
-            |_config, client, _backend, _fetcher, select_chain, _transaction_pool| {
-                let fprb = Box::new(DummyFinalityProofRequestBuilder::default()) as Box<_>;
-                let import_queue = consensus_pow::import_queue(
-                    Box::new(client.clone()),
-                    client.clone(),
-                    kulupu_pow::RandomXAlgorithm::new(client.clone(), 8011),
-                    0,
-                    select_chain,
-                    inherent_data_providers.clone(),
-                )?;
-
-                Ok((import_queue, fprb))
-            },
-        )?
-        .with_finality_proof_provider(|_client, _backend| Ok(Arc::new(()) as _))?
-        .with_network_protocol(|_| Ok(NodeProtocol::new()))?
-        .build()
-}
-
-fn new_web_server(port: u32) ->Result<Sink, &'static str>{
-    let mut sink_params;
-    let mut sink_seal;
-
+fn new_web_server(port: u32, tx_seal: Arc<Mutex<Sender<String>>>, rx_params: Arc<Mutex<Receiver<String>>>) {
     let mut io = PubSubHandler::new(MetaIoHandler::default());
-    io.add_method("add_method mine_params", |_params: Params| {
-        Ok(Value::String("hello".to_string()))
-    });
     io.add_subscription(
-        "mine_params",
+        MINE_PARAMS,
         (
-            "sub_get_mine_params",
+            SUB_GET_MINE_PARAMS,
             move |params: Params, _, subscriber: Subscriber| {
-                println!("new_miner_server mine_params");
-
-                if params != Params::None {
-                    subscriber
-                        .reject(Error {
-                            code: ErrorCode::ParseError,
-                            message: "Invalid parameters. Subscription rejected.".into(),
-                            data: None,
-                        })
-                        .unwrap();
-                    return;
-                }
-                sink_params = subscriber
-                        .assign_id_async(SubscriptionId::Number(5))
+                let rx_params = rx_params.clone();
+                let th = thread::spawn(move || {
+                    let sink = subscriber
+                        .assign_id_async(SubscriptionId::Number(1))
                         .wait()
                         .unwrap();
-                    println!("new_miner_server notify");
-
+                    loop {
+                        let rx_params = rx_params.try_lock();
+                        match rx_params {
+                            Ok(rx) => {
+                                match rx.recv_timeout(Duration::from_secs(60)) {
+                                    Ok(result) => {
+                                        drop(rx);
+                                        let params = serde_json::from_str(result.as_str()).unwrap();
+                                        match sink.notify(Params::Map(params)).wait() {
+                                            Ok(_) => {}
+                                            Err(_) => {}
+                                        }
+                                    }
+                                    Err(_) => {
+                                        drop(rx);
+                                    }
+                                }
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                });
             },
         ),
         ("remove_get_mine_params", |_id: SubscriptionId, _| {
-            println!("Closing subscription");
             futures::future::ok(Value::Bool(true))
         }),
     );
+    let tx_seal = tx_seal.clone();
     io.add_subscription(
-        "raw_seal",
+        RAWSEAL_METHOD,
         (
-            "pub_raw_seal",
+            PUB_RAW_SEAL,
             move |params: Params, _, subscriber: Subscriber| {
-                println!("raw_seal:{:?}", params);
-                 sink_seal = subscriber
-                        .assign_id_async(SubscriptionId::Number(5))
-                        .wait()
-                        .unwrap();
+                match params.parse::<Vec<u8>>() {
+                    Ok(s) => {
+                        tx_seal.lock().unwrap().send(hex::encode(s)).unwrap();
+                    }
+                    Err(_) => {
+                        tx_seal.lock().unwrap().send(hex::encode(vec![0])).unwrap();
+                    }
+
+                }
             },
         ),
         ("remove_get_info", |_id: SubscriptionId, _| {
-            println!("Closing subscription");
             futures::future::ok(Value::Bool(true))
         }),
     );
     let server = ServerBuilder::with_meta_extractor(io, |context: &RequestContext| {
         Arc::new(Session::new(context.sender()))
     })
-        .start(&"127.0.0.1:8011".parse().unwrap())
+        .start(&format!("127.0.0.1:{:}", port).as_str().parse::<SocketAddr>().unwrap())
         .expect("Unable to start RPC server");
     thread::spawn(move || {
         server.wait()
     });
-    Ok(sink_params)
 }

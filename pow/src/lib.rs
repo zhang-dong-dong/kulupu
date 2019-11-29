@@ -12,21 +12,17 @@ use sr_primitives::traits::{
     Block as BlockT, Header as HeaderT, ProvideRuntimeApi, UniqueSaturatedInto,
 };
 use std::cell::RefCell;
-use std::sync::Arc;
-
 use hex::{encode, ToHex};
 use jsonrpc_core::{
-    futures, futures::future::Future, Error, ErrorCode, MetaIoHandler, Params, Value,BoxFuture
+    futures, futures::future::Future, Error, ErrorCode, MetaIoHandler, Params, Value, BoxFuture,
+    futures::sync::mpsc
 };
 use jsonrpc_pubsub::{PubSubHandler, Session, Subscriber, SubscriptionId, Sink};
 use jsonrpc_ws_server::{RequestContext, ServerBuilder};
 use serde_json::json;
-use std::{thread, time};
-
-pub const MINE_PARAMS: &str = "mine_params";
-pub const SUB_GET_MINE_PARAMS: &str = "sub_get_mine_params";
-pub const RAWSEAL_METHOD: &str = "raw_seal";
-pub const PUB_RAW_SEAL: &str = "pub_raw_seal";
+use std::{thread, time::Duration};
+use std::sync::{Arc, Mutex, mpsc::{Sender, Receiver}};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, PartialEq, Eq, Encode, Decode, Debug)]
 pub struct Seal {
@@ -50,12 +46,12 @@ pub struct Compute {
     pub nonce: H256,
 }
 
-#[derive(Clone, PartialEq, Eq)]
-pub struct ComputeParams {
-    pub key_hash: H256,
-    pub pre_hash: H256,
+#[derive(Clone, PartialEq, Eq, Serialize)]
+pub struct MineParams {
+    pub keyhash: H256,
+    pub prehash: H256,
     pub difficulty: Difficulty,
-    pub nonce: H256,
+    pub round: u32,
 }
 
 thread_local!(static MACHINES: RefCell<LruCache<H256, randomx::FullVM>> = RefCell::new(LruCache::new(3)));
@@ -127,12 +123,13 @@ where
 
 pub struct RandomXAlgorithm<C> {
     client: Arc<C>,
-    sink: Sink,
+    tx1: Arc<Mutex<Sender<String>>>,
+    rx2: Arc<Mutex<Receiver<String>>>,
 }
 
 impl<C> RandomXAlgorithm<C> {
-    pub fn new(client: Arc<C>, sink: Sink) -> Self {
-        Self { client, sink }
+    pub fn new(client: Arc<C>, tx1: Arc<Mutex<Sender<String>>>, rx2: Arc<Mutex<Receiver<String>>>) -> Self {
+        Self {client, tx1, rx2}
     }
 }
 
@@ -204,24 +201,35 @@ where
         let mut rng = SmallRng::from_rng(&mut thread_rng())
             .map_err(|e| format!("Initialize RNG failed for mining: {:?}", e))?;
         let key_hash = key_hash(self.client.as_ref(), parent)?;
-        /*
-                for _ in 0..round {
-                    let nonce = H256::random_using(&mut rng);
-
-                    let compute = Compute {
-                        key_hash,
-                        difficulty,
-                        pre_hash: *pre_hash,
-                        nonce,
-                    };
-
-                    let seal = compute.compute();
-
-                    if is_valid_hash(&seal.work, difficulty) {
-                        return Ok(Some(seal.encode()))
+        //let v = json!({ "round": round, "keyhash": key_hash, "prehash": *pre_hash, "difficulty": difficulty});
+        let params = MineParams {
+            keyhash: key_hash,
+            prehash: *pre_hash,
+            difficulty: difficulty,
+            round: round,
+        };
+        let jp = serde_json::to_string(&params).unwrap();
+        info!("mine-params :{:?}", jp);
+        let result = self.tx1.lock().unwrap().send(jp).unwrap();
+        loop {
+            let result = self.rx2.lock().unwrap().recv_timeout(Duration::from_secs(70));
+            match result {
+                Ok(res) => {
+                    let v = hex::decode(res).unwrap();
+                    if v.len() == 1 {
+                        return Ok(None)
                     }
+                    info!("{:?}", v.clone());
+                    return Ok(Some(v))
                 }
-        */
+                Err(e) => {
+                    warn!("{:?}", e);
+                    return Ok(None)
+                }
+            }
+            info!("mine recv result:{:?}", result);
+            //thread::sleep(time::Duration::from_millis(100));
+        }
         Ok(None)
     }
 }
