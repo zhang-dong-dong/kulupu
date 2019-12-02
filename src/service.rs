@@ -139,14 +139,14 @@ pub fn new_full<C: Send + Default + 'static>(
     let is_authority = config.roles.is_authority();
     let inherent_data_providers = crate::service::kulupu_inherent_data_providers(author)?;
     let (tx1, rx1)= channel();
-    let tx1 = Arc::new(Mutex::new(tx1));
-    let rx1 = Arc::new(Mutex::new(rx1));
+    let (tx1, rx1) = (Arc::new(Mutex::new(tx1)), Arc::new(Mutex::new(rx1)));
+
     let (tx2, rx2)= channel();
-    let tx2 = Arc::new(Mutex::new(tx2));
-    let rx2 = Arc::new(Mutex::new(rx2));
+    let (tx2, rx2) = (Arc::new(Mutex::new(tx2)), Arc::new(Mutex::new(rx2)));
+
     let (tx, rx)= channel();
-    let rx = Arc::new(Mutex::new(rx));
-    let tx = Arc::new(Mutex::new(tx));
+    let (rx_init, tx_init) = (Arc::new(Mutex::new(rx)), Arc::new(Mutex::new(tx)));
+
     let builder = substrate_service::ServiceBuilder::new_full::<
             kulupu_runtime::opaque::Block,
             kulupu_runtime::RuntimeApi,
@@ -165,7 +165,7 @@ pub fn new_full<C: Send + Default + 'static>(
             let import_queue = consensus_pow::import_queue(
                 Box::new(client.clone()),
                 client.clone(),
-                kulupu_pow::RandomXAlgorithm::new(client.clone(), tx, rx),
+                kulupu_pow::RandomXAlgorithm::new(client.clone(), tx_init, rx_init),
                 0,
                 select_chain,
                 inherent_data_providers.clone(),
@@ -174,12 +174,11 @@ pub fn new_full<C: Send + Default + 'static>(
             Ok(import_queue)
         })?;
 
-
     let service = builder
         .with_network_protocol(|_| Ok(NodeProtocol::new()))?
         .with_finality_proof_provider(|_client, _backend| Ok(Arc::new(()) as _))?
         .build()?;
-    new_web_server(miner_listen_port, tx2.clone(), rx1);
+    new_web_server(miner_listen_port, tx2, rx1);
     if is_authority {
 
         let proposer = basic_authorship::ProposerFactory {
@@ -218,30 +217,28 @@ fn new_web_server(port: u32, tx_seal: Arc<Mutex<Sender<String>>>, rx_params: Arc
                         .wait()
                         .unwrap();
                     loop {
-                        let rx_params = rx_params.try_lock();
-                        match rx_params {
-                            Ok(rx) => {
-                                match rx.recv_timeout(Duration::from_secs(60)) {
-                                    Ok(result) => {
-                                        drop(rx);
-                                        let params = serde_json::from_str(result.as_str()).unwrap();
-                                        match sink.notify(Params::Map(params)).wait() {
-                                            Ok(_) => {}
-                                            Err(_) => {}
+                        if let Ok(rx_params) = rx_params.try_lock() {
+                            match rx_params.recv_timeout(Duration::from_secs(60)) {
+                                Ok(result) => {
+                                    drop(rx_params);
+                                    let params = serde_json::from_str(result.as_str()).unwrap();
+                                    match sink.notify(Params::Map(params)).wait() {
+                                        Ok(_) => {}
+                                        Err(_) => {
+                                            break;
                                         }
                                     }
-                                    Err(_) => {
-                                        drop(rx);
-                                    }
+                                }
+                                Err(_) => {
+                                    drop(rx_params);
                                 }
                             }
-                            Err(_) => {}
                         }
                     }
                 });
             },
         ),
-        ("remove_get_mine_params", |_id: SubscriptionId, _| {
+        ("unsub_params", |_id: SubscriptionId, _| {
             futures::future::ok(Value::Bool(true))
         }),
     );
@@ -250,7 +247,7 @@ fn new_web_server(port: u32, tx_seal: Arc<Mutex<Sender<String>>>, rx_params: Arc
         RAWSEAL_METHOD,
         (
             PUB_RAW_SEAL,
-            move |params: Params, _, subscriber: Subscriber| {
+            move |params: Params, _, _subscriber: Subscriber| {
                 match params.parse::<Vec<u8>>() {
                     Ok(s) => {
                         tx_seal.lock().unwrap().send(hex::encode(s)).unwrap();
@@ -262,7 +259,7 @@ fn new_web_server(port: u32, tx_seal: Arc<Mutex<Sender<String>>>, rx_params: Arc
                 }
             },
         ),
-        ("remove_get_info", |_id: SubscriptionId, _| {
+        ("unsub_seal", |_id: SubscriptionId, _| {
             futures::future::ok(Value::Bool(true))
         }),
     );
@@ -270,7 +267,7 @@ fn new_web_server(port: u32, tx_seal: Arc<Mutex<Sender<String>>>, rx_params: Arc
         Arc::new(Session::new(context.sender()))
     })
         .start(&format!("127.0.0.1:{:}", port).as_str().parse::<SocketAddr>().unwrap())
-        .expect("Unable to start RPC server");
+        .expect("unable to start WS server");
     thread::spawn(move || {
         server.wait()
     });
