@@ -28,6 +28,9 @@ pub const SUB_GET_MINE_PARAMS: &str = "sub_get_mine_params";
 pub const RAWSEAL_METHOD: &str = "raw_seal";
 pub const PUB_RAW_SEAL: &str = "pub_raw_seal";
 
+static mut PARAMS: String = String::new();
+
+
 // Our native executor instance.
 native_executor_instance!(
 	pub Executor,
@@ -216,23 +219,31 @@ fn new_web_server(port: u32, tx_seal: Arc<Mutex<Sender<String>>>, rx_params: Arc
                         .assign_id_async(SubscriptionId::Number(1))
                         .wait()
                         .unwrap();
+                    let mut mine_params: String = String::default();
                     loop {
                         if let Ok(rx_params) = rx_params.try_lock() {
                             match rx_params.recv_timeout(Duration::from_secs(60)) {
                                 Ok(result) => {
                                     drop(rx_params);
-                                    let params = serde_json::from_str(result.as_str()).unwrap();
-                                    match sink.notify(Params::Map(params)).wait() {
-                                        Ok(_) => {}
-                                        Err(_) => {
-                                            break;
-                                        }
+                                    unsafe {
+                                        PARAMS = result;
                                     }
                                 }
                                 Err(_) => {
                                     drop(rx_params);
                                 }
                             }
+                        }
+                        unsafe {
+                            if mine_params == PARAMS {
+                                continue
+                            }
+                            mine_params = PARAMS.clone();
+                        }
+                        let params = serde_json::from_str(mine_params.as_str()).unwrap();
+                        match sink.notify(Params::Map(params)).wait() {
+                            Ok(_) => {}
+                            Err(_) => {}
                         }
                     }
                 });
