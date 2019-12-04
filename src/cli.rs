@@ -41,6 +41,7 @@ where
                 info!("Roles: {:?}", config.roles);
 
                 let runtime = Runtime::new().map_err(|e| format!("{:?}", e))?;
+                let executor = runtime.executor();
                 match config.roles {
                     ServiceRoles::LIGHT => run_until_exit(
                         runtime,
@@ -56,6 +57,7 @@ where
                             custom_args.threads.unwrap_or(1),
                             custom_args.round.unwrap_or(5000),
                             custom_args.miner_listen_port,
+                            executor
                         )
                         .map_err(|e| format!("{:?}", e))?,
                         exit,
@@ -65,22 +67,7 @@ where
             })
         }
         ParseAndPrepare::BuildSpec(cmd) => cmd.run(load_spec),
-        ParseAndPrepare::ExportBlocks(cmd) => cmd.run_with_builder::<(), _, _, _, _, _, _>(
-            |config| Ok(new_full_start!(config, None).0),
-            load_spec,
-            exit,
-        ),
-        ParseAndPrepare::ImportBlocks(cmd) => cmd.run_with_builder::<(), _, _, _, _, _, _>(
-            |config| Ok(new_full_start!(config, None).0),
-            load_spec,
-            exit,
-        ),
-        ParseAndPrepare::PurgeChain(cmd) => cmd.run(load_spec),
-        ParseAndPrepare::RevertChain(cmd) => cmd.run_with_builder::<(), _, _, _, _, _>(
-            |config| Ok(new_full_start!(config, None).0),
-            load_spec,
-        ),
-        ParseAndPrepare::CustomCommand(_) => Ok(()),
+        _ => Ok(()),
     }?;
 
     Ok(())

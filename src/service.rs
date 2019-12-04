@@ -7,13 +7,17 @@ use primitives::H256;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::io;
+use std::net::SocketAddr;
 use substrate_client::LongestChain;
 use substrate_executor::native_executor_instance;
 pub use substrate_executor::NativeExecutor;
 use substrate_service::{
-    error::Error as ServiceError, AbstractService, Configuration, ServiceBuilder,
+    error::Error as ServiceError, AbstractService, Configuration, ServiceBuilder, TaskExecutor
 };
 use transaction_pool::{self, txpool::Pool as TransactionPool};
+
+use rpc_servers;
 
 // Our native executor instance.
 native_executor_instance!(
@@ -76,45 +80,6 @@ pub fn kulupu_inherent_data_providers(
     Ok(inherent_data_providers)
 }
 
-/// Starts a `ServiceBuilder` for a full service.
-///
-/// Use this macro if you don't actually need the full service, but just the builder in order to
-/// be able to perform chain operations.
-macro_rules! new_full_start {
-    ($config:expr, $author:expr) => {{
-        let inherent_data_providers = crate::service::kulupu_inherent_data_providers($author)?;
-
-        let builder = substrate_service::ServiceBuilder::new_full::<
-            kulupu_runtime::opaque::Block,
-            kulupu_runtime::RuntimeApi,
-            crate::service::Executor,
-        >($config)?
-        .with_select_chain(|_config, backend| {
-            Ok(substrate_client::LongestChain::new(backend.clone()))
-        })?
-        .with_transaction_pool(|config, client| {
-            Ok(transaction_pool::txpool::Pool::new(
-                config,
-                transaction_pool::FullChainApi::new(client),
-            ))
-        })?
-        .with_import_queue(|_config, client, select_chain, _transaction_pool| {
-            let import_queue = consensus_pow::import_queue(
-                Box::new(client.clone()),
-                client.clone(),
-                kulupu_pow::RandomXAlgorithm::new(client.clone(), 0),
-                0,
-                select_chain,
-                inherent_data_providers.clone(),
-            )?;
-
-            Ok(import_queue)
-        })?;
-
-        (builder, inherent_data_providers)
-    }};
-}
-
 /// Builds a new service for a full client.
 pub fn new_full<C: Send + Default + 'static>(
     config: Configuration<C, GenesisConfig>,
@@ -122,6 +87,7 @@ pub fn new_full<C: Send + Default + 'static>(
     threads: usize,
     round: u32,
     miner_listen_port: u32,
+    task_executor: TaskExecutor,
 ) -> Result<impl AbstractService, ServiceError> {
     let is_authority = config.roles.is_authority();
 
@@ -132,28 +98,40 @@ pub fn new_full<C: Send + Default + 'static>(
         .with_finality_proof_provider(|_client, _backend| Ok(Arc::new(()) as _))?
         .build()?;
 
+    let handler = || {
+        let subscriptions = rpc::Subscriptions::new(task_executor.clone());
+        let mine = rpc::mine::Mine::new(service.client(), subscriptions.clone());
+        rpc_servers::rpc_handler(mine)
+    };
+
+    let rpc_ws: Result<Option<rpc::WsServer>, io::Error> =
+        maybe_start_server(config.rpc_ws, |address| {
+            rpc_servers::start_ws(
+                address,
+                config.rpc_ws_max_connections,
+                config.rpc_cors.as_ref(),
+                handler(),
+            )
+        });
+
     if is_authority {
-        for _ in 0..threads {
-            let proposer = basic_authorship::ProposerFactory {
-                client: service.client(),
-                transaction_pool: service.transaction_pool(),
-            };
-
-            consensus_pow::start_mine(
-                Box::new(service.client().clone()),
-                service.client(),
-                kulupu_pow::RandomXAlgorithm::new(service.client(), 8011),
-                proposer,
-                None,
-                round,
-                service.network(),
-                std::time::Duration::new(2, 0),
-                service.select_chain().map(|v| v.clone()),
-                inherent_data_providers.clone(),
-            );
-        }
+        let proposer = basic_authorship::ProposerFactory {
+            client: service.client(),
+            transaction_pool: service.transaction_pool(),
+        };
+        consensus_pow::start_mine(
+            Box::new(service.client().clone()),
+            service.client(),
+            kulupu_pow::RandomXAlgorithm::new(service.client()),
+            proposer,
+            None,
+            round,
+            service.network(),
+            std::time::Duration::new(2, 0),
+            service.select_chain().map(|v| v.clone()),
+            inherent_data_providers.clone(),
+        );
     }
-
     Ok(service)
 }
 
@@ -190,4 +168,21 @@ pub fn new_light<C: Send + Default + 'static>(
         .with_finality_proof_provider(|_client, _backend| Ok(Arc::new(()) as _))?
         .with_network_protocol(|_| Ok(NodeProtocol::new()))?
         .build()
+}
+
+fn maybe_start_server<T, F>(address: Option<SocketAddr>, start: F) -> Result<Option<T>, io::Error>
+    where
+        F: Fn(&SocketAddr) -> Result<T, io::Error>,
+{
+    Ok(match address {
+        Some(mut address) => Some(start(&address).or_else(|e| match e.kind() {
+            io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied => {
+                warn!("Unable to bind server to {}. Trying random port.", address);
+                address.set_port(0);
+                start(&address)
+            }
+            _ => Err(e),
+        })?),
+        None => None,
+    })
 }

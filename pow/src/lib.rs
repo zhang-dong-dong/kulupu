@@ -50,14 +50,6 @@ pub struct Compute {
     pub nonce: H256,
 }
 
-#[derive(Clone, PartialEq, Eq)]
-pub struct ComputeParams {
-    pub key_hash: H256,
-    pub pre_hash: H256,
-    pub difficulty: Difficulty,
-    pub nonce: H256,
-}
-
 thread_local!(static MACHINES: RefCell<LruCache<H256, randomx::FullVM>> = RefCell::new(LruCache::new(3)));
 
 impl Compute {
@@ -127,12 +119,12 @@ where
 
 pub struct RandomXAlgorithm<C> {
     client: Arc<C>,
-    port: u32,
+    compute: Compute,
 }
 
 impl<C> RandomXAlgorithm<C> {
-    pub fn new(client: Arc<C>, port: u32) -> Self {
-        Self { client, port }
+    pub fn new(client: Arc<C>, compute: Compute) -> Self {
+        Self { client, compute }
     }
 }
 
@@ -204,7 +196,6 @@ where
         let mut rng = SmallRng::from_rng(&mut thread_rng())
             .map_err(|e| format!("Initialize RNG failed for mining: {:?}", e))?;
         let key_hash = key_hash(self.client.as_ref(), parent)?;
-        println!("new_miner_server : {:?}", self.port);
         /*
                 for _ in 0..round {
                     let nonce = H256::random_using(&mut rng);

@@ -33,6 +33,8 @@ kulupu-runtime = { path = "runtime" }
 kulupu-primitives = { path = "primitives" }
 consensus-pow = { package = "substrate-consensus-pow", path = "vendor/substrate/core/consensus/pow" }
 kulupu-pow = { path = "pow" }
+rpc-servers = { path = "rpc-servers" }
+rpc = { path = "rpc" }
 srml-timestamp = { path = "vendor/substrate/srml/timestamp" }
 srml-system = { path = "vendor/substrate/srml/system" }
 srml-anyupgrade = { path = "anyupgrade" }
@@ -50,5 +52,7 @@ members = [
 	"pow",
 	"anyupgrade",
 	"rewards",
+	"rpc",
+	"rpc-servers"
 ]
 exclude = ["vendor"]
