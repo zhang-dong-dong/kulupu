@@ -193,7 +193,6 @@ where
         let _rng = SmallRng::from_rng(&mut thread_rng())
             .map_err(|e| format!("Initialize RNG failed for mining: {:?}", e))?;
         let key_hash = key_hash(self.client.as_ref(), parent)?;
-        //let v = json!({ "round": round, "keyhash": key_hash, "prehash": *pre_hash, "difficulty": difficulty});
         let params = MineParams {
             keyhash: key_hash,
             prehash: *pre_hash,

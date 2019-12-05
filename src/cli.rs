@@ -80,10 +80,6 @@ where
 //            |config| Ok(new_full_start!(config, None).0),
 //            load_spec,
 //        ),
-        ParseAndPrepare::RevertChain(_) => Ok(()),
-        ParseAndPrepare::ExportBlocks(_) => Ok(()),
-        ParseAndPrepare::ImportBlocks(_) => Ok(()),
-        ParseAndPrepare::PurgeChain(_) => Ok(()),
         ParseAndPrepare::CustomCommand(_) => Ok(()),
     }?;
 
