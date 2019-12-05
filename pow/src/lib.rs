@@ -12,17 +12,9 @@ use sr_primitives::traits::{
     Block as BlockT, Header as HeaderT, ProvideRuntimeApi, UniqueSaturatedInto,
 };
 use std::cell::RefCell;
-use hex::{encode, ToHex};
-use jsonrpc_core::{
-    futures, futures::future::Future, Error, ErrorCode, MetaIoHandler, Params, Value, BoxFuture,
-    futures::sync::mpsc
-};
-use jsonrpc_pubsub::{PubSubHandler, Session, Subscriber, SubscriptionId, Sink};
-use jsonrpc_ws_server::{RequestContext, ServerBuilder};
-use serde_json::json;
-use std::{thread, time::Duration};
+use std::time::Duration;
 use std::sync::{Arc, Mutex, mpsc::{Sender, Receiver}};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 #[derive(Clone, PartialEq, Eq, Encode, Decode, Debug)]
 pub struct Seal {
@@ -198,7 +190,7 @@ where
         difficulty: Difficulty,
         round: u32,
     ) -> Result<Option<RawSeal>, String> {
-        let mut rng = SmallRng::from_rng(&mut thread_rng())
+        let _rng = SmallRng::from_rng(&mut thread_rng())
             .map_err(|e| format!("Initialize RNG failed for mining: {:?}", e))?;
         let key_hash = key_hash(self.client.as_ref(), parent)?;
         //let v = json!({ "round": round, "keyhash": key_hash, "prehash": *pre_hash, "difficulty": difficulty});
@@ -208,29 +200,43 @@ where
             difficulty: difficulty,
             round: round,
         };
-        let jp = serde_json::to_string(&params).unwrap();
-        info!("mine-params :{:?}", jp);
-        let result = self.tx1.lock().unwrap().send(jp).unwrap();
-        loop {
-            let result = self.rx2.lock().unwrap().recv_timeout(Duration::from_secs(70));
-            match result {
-                Ok(res) => {
-                    let v = hex::decode(res).unwrap();
-                    if v.len() == 1 {
+        match serde_json::to_string(&params) {
+            Ok(p) => {
+                match self.tx1.lock().unwrap().send(p.clone()) {
+                    Ok(_) => {
+                        info!("mine-params :{:?}", p)
+                    }
+                    Err(e) => {
+                        warn!("channel send: {}", e);
                         return Ok(None)
                     }
-                    info!("{:?}", v.clone());
-                    return Ok(Some(v))
+                }
+            }
+            Err(e) => {
+                return Err(e.to_string())
+            }
+        }
+
+        loop {
+            let result = self.rx2.lock().unwrap().recv_timeout(Duration::from_secs(1000));
+            match result {
+                Ok(res) => {
+                    if let Ok(v) = hex::decode(res) {
+                        if v.len() == 1 {
+                            return Ok(None)
+                        }
+                        info!("recv seal {:?}", v.clone());
+                        return Ok(Some(v))
+                    } else {
+                        return Ok(None)
+                    }
                 }
                 Err(e) => {
-                    warn!("{:?}", e);
+                    warn!("recv seal {:?}", e);
                     return Ok(None)
                 }
             }
-            info!("mine recv result:{:?}", result);
-            //thread::sleep(time::Duration::from_millis(100));
         }
-        Ok(None)
     }
 }
 

@@ -1508,9 +1508,6 @@ name = "kulupu-pow"
 version = "0.1.0"
 dependencies = [
  "hex 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)",
- "jsonrpc-core 14.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
- "jsonrpc-pubsub 14.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
- "jsonrpc-ws-server 14.0.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "kulupu-primitives 0.1.0",
  "kulupu-runtime 0.1.0",
  "log 0.4.8 (registry+https://github.com/rust-lang/crates.io-index)",

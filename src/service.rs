@@ -212,9 +212,9 @@ fn new_web_server(port: u32, tx_seal: Arc<Mutex<Sender<String>>>, rx_params: Arc
         MINE_PARAMS,
         (
             SUB_GET_MINE_PARAMS,
-            move |params: Params, _, subscriber: Subscriber| {
+            move |_params: Params, _, subscriber: Subscriber| {
                 let rx_params = rx_params.clone();
-                let th = thread::spawn(move || {
+                thread::spawn(move || {
                     let sink = subscriber
                         .assign_id_async(SubscriptionId::Number(1))
                         .wait()
@@ -222,7 +222,7 @@ fn new_web_server(port: u32, tx_seal: Arc<Mutex<Sender<String>>>, rx_params: Arc
                     let mut mine_params: String = String::default();
                     loop {
                         if let Ok(rx_params) = rx_params.try_lock() {
-                            match rx_params.recv_timeout(Duration::from_secs(60)) {
+                            match rx_params.recv_timeout(Duration::from_secs(1000)) {
                                 Ok(result) => {
                                     drop(rx_params);
                                     unsafe {
@@ -240,10 +240,11 @@ fn new_web_server(port: u32, tx_seal: Arc<Mutex<Sender<String>>>, rx_params: Arc
                             }
                             mine_params = PARAMS.clone();
                         }
-                        let params = serde_json::from_str(mine_params.as_str()).unwrap();
-                        match sink.notify(Params::Map(params)).wait() {
-                            Ok(_) => {}
-                            Err(_) => {}
+                        if let Ok(p) = serde_json::from_str(mine_params.as_str()) {
+                            match sink.notify(Params::Map(p)).wait() {
+                                Ok(_) => {}
+                                Err(_) => {}
+                            }
                         }
                     }
                 });
