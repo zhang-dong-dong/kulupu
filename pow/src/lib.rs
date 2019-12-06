@@ -12,21 +12,9 @@ use sr_primitives::traits::{
     Block as BlockT, Header as HeaderT, ProvideRuntimeApi, UniqueSaturatedInto,
 };
 use std::cell::RefCell;
-use std::sync::Arc;
-
-use hex::{encode, ToHex};
-use jsonrpc_core::{
-    futures, futures::future::Future, Error, ErrorCode, MetaIoHandler, Params, Value,BoxFuture
-};
-use jsonrpc_pubsub::{PubSubHandler, Session, Subscriber, SubscriptionId};
-use jsonrpc_ws_server::{RequestContext, ServerBuilder};
-use serde_json::json;
-use std::{thread, time};
-
-pub const MINE_PARAMS: &str = "mine_params";
-pub const SUB_GET_MINE_PARAMS: &str = "sub_get_mine_params";
-pub const RAWSEAL_METHOD: &str = "raw_seal";
-pub const PUB_RAW_SEAL: &str = "pub_raw_seal";
+use std::time::Duration;
+use std::sync::{Arc, Mutex, mpsc::{Sender, Receiver}};
+use serde::Serialize;
 
 #[derive(Clone, PartialEq, Eq, Encode, Decode, Debug)]
 pub struct Seal {
@@ -50,12 +38,12 @@ pub struct Compute {
     pub nonce: H256,
 }
 
-#[derive(Clone, PartialEq, Eq)]
-pub struct ComputeParams {
-    pub key_hash: H256,
-    pub pre_hash: H256,
+#[derive(Clone, PartialEq, Eq, Serialize)]
+pub struct MineParams {
+    pub keyhash: H256,
+    pub prehash: H256,
     pub difficulty: Difficulty,
-    pub nonce: H256,
+    pub round: u32,
 }
 
 thread_local!(static MACHINES: RefCell<LruCache<H256, randomx::FullVM>> = RefCell::new(LruCache::new(3)));
@@ -127,12 +115,13 @@ where
 
 pub struct RandomXAlgorithm<C> {
     client: Arc<C>,
-    port: u32,
+    tx1: Arc<Mutex<Sender<String>>>,
+    rx2: Arc<Mutex<Receiver<String>>>,
 }
 
 impl<C> RandomXAlgorithm<C> {
-    pub fn new(client: Arc<C>, port: u32) -> Self {
-        Self { client, port }
+    pub fn new(client: Arc<C>, tx1: Arc<Mutex<Sender<String>>>, rx2: Arc<Mutex<Receiver<String>>>) -> Self {
+        Self {client, tx1, rx2}
     }
 }
 
@@ -201,132 +190,52 @@ where
         difficulty: Difficulty,
         round: u32,
     ) -> Result<Option<RawSeal>, String> {
-        let mut rng = SmallRng::from_rng(&mut thread_rng())
+        let _rng = SmallRng::from_rng(&mut thread_rng())
             .map_err(|e| format!("Initialize RNG failed for mining: {:?}", e))?;
         let key_hash = key_hash(self.client.as_ref(), parent)?;
-        println!("new_miner_server : {:?}", self.port);
-        /*
-                for _ in 0..round {
-                    let nonce = H256::random_using(&mut rng);
-
-                    let compute = Compute {
-                        key_hash,
-                        difficulty,
-                        pre_hash: *pre_hash,
-                        nonce,
-                    };
-
-                    let seal = compute.compute();
-
-                    if is_valid_hash(&seal.work, difficulty) {
-                        return Ok(Some(seal.encode()))
+        let params = MineParams {
+            keyhash: key_hash,
+            prehash: *pre_hash,
+            difficulty: difficulty,
+            round: round,
+        };
+        match serde_json::to_string(&params) {
+            Ok(p) => {
+                match self.tx1.lock().unwrap().send(p.clone()) {
+                    Ok(_) => {
+                        info!("mine-params :{:?}", p)
+                    }
+                    Err(e) => {
+                        warn!("channel send: {}", e);
+                        return Ok(None)
                     }
                 }
-        */
-        let v = json!({ "round": round, "key_hash": key_hash, "pre_hash": *pre_hash, "difficulty": difficulty});
-        let mut map_params = serde_json::Map::new();
-        map_params.insert("round".to_string(), Value::String(round.to_string()));
-        map_params.insert(
-            "keyhash".to_string(),
-            Value::String(hex::encode(key_hash.as_bytes().to_vec())),
-        );
-        map_params.insert(
-            "prehash".to_string(),
-            Value::String(hex::encode(pre_hash.as_bytes().to_vec())),
-        );
-        map_params.insert(
-            "difficulty".to_string(),
-            Value::String(difficulty.to_string()),
-        );
+            }
+            Err(e) => {
+                return Err(e.to_string())
+            }
+        }
 
-        println!("map_params:{:?}", map_params);
-        let mut io = PubSubHandler::new(MetaIoHandler::default());
-        io.add_method("add_method mine_params", |_params: Params| {
-            Ok(Value::String("hello".to_string()))
-        });
-        io.add_subscription(
-            "mine_params",
-            (
-                "sub_get_mine_params",
-                move |params: Params, _, subscriber: Subscriber| {
-                    println!("new_miner_server mine_params");
-
-                    if params != Params::None {
-                        subscriber
-                            .reject(Error {
-                                code: ErrorCode::ParseError,
-                                message: "Invalid parameters. Subscription rejected.".into(),
-                                data: None,
-                            })
-                            .unwrap();
-                        return;
-                    }
-                    let p = map_params.clone();
-                    thread::spawn(move || {
-                        let sink = subscriber
-                            .assign_id_async(SubscriptionId::Number(5))
-                            .wait()
-                            .unwrap();
-                        println!("new_miner_server notify");
-                        //thread::sleep(time::Duration::from_millis(100));
-                        match sink.notify(Params::Map(p)).wait() {
-                            Ok(_) => {}
-                            Err(_) => {
-                                println!("Subscription has ended, finishing.");
-                            }
+        loop {
+            let result = self.rx2.lock().unwrap().recv_timeout(Duration::from_secs(1000));
+            match result {
+                Ok(res) => {
+                    if let Ok(v) = hex::decode(res) {
+                        if v.len() == 1 {
+                            return Ok(None)
                         }
-                    });
-                },
-            ),
-            ("remove_get_mine_params", |_id: SubscriptionId, _| {
-                println!("Closing subscription");
-                futures::future::ok(Value::Bool(true))
-            }),
-        );
-        io.add_subscription(
-            "raw_seal",
-            (
-                "pub_raw_seal",
-                move |params: Params, _, subscriber: Subscriber| {
-                    println!("raw_seal:{:?}", params);
-
-					thread::spawn(move || {
-						let sink = subscriber
-							.assign_id_async(SubscriptionId::Number(5))
-							.wait()
-							.unwrap();
-						// or subscriber.reject(Error {} );
-						// or drop(subscriber)
-
-						loop {
-							thread::sleep(time::Duration::from_millis(1000));
-							match sink
-								.notify(Params::Array(vec![Value::Number(10.into())]))
-								.wait()
-								{
-									Ok(_) => {}
-									Err(_) => {
-										println!("Subscription has ended, finishing.");
-										break;
-									}
-								}
-						}
-					});
-                    //return Ok(Some(params.encode()));
-                },
-            ),
-            ("remove_get_info", |_id: SubscriptionId, _| {
-                println!("Closing subscription");
-                futures::future::ok(Value::Bool(true))
-            }),
-        );
-        let server = ServerBuilder::with_meta_extractor(io, |context: &RequestContext| {
-            Arc::new(Session::new(context.sender()))
-        })
-        .start(&"127.0.0.1:8011".parse().unwrap())
-        .expect("Unable to start RPC server");
-        server.wait();
-        Ok(None)
+                        info!("recv seal {:?}", v.clone());
+                        return Ok(Some(v))
+                    } else {
+                        return Ok(None)
+                    }
+                }
+                Err(e) => {
+                    warn!("recv seal {:?}", e);
+                    return Ok(None)
+                }
+            }
+        }
     }
 }
 

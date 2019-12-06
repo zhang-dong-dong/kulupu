@@ -40,6 +40,10 @@ srml-rewards = { path = "rewards" }
 structopt = "0.2"
 consensus-common = { package = "substrate-consensus-common", path = "vendor/substrate/core/consensus/common" }
 serde_json = "1.0"
+jsonrpc-core = "14.0.3"
+jsonrpc-pubsub = "14.0.3"
+jsonrpc-ws-server = "14.0.3"
+hex = "0.3"
 
 [build-dependencies]
 vergen = "3"
