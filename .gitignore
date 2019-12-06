@@ -3,3 +3,5 @@
 /keys
 /data*
 /shell.nix
+
+\.idea/

@@ -81,6 +81,7 @@ where
 //            load_spec,
 //        ),
         ParseAndPrepare::CustomCommand(_) => Ok(()),
+        _ => Ok(())
     }?;
 
     Ok(())
