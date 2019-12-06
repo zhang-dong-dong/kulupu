@@ -48,46 +48,52 @@ pub fn kulupu_inherent_data_providers(
 ) -> Result<inherents::InherentDataProviders, ServiceError> {
     let inherent_data_providers = inherents::InherentDataProviders::new();
 
-    if !inherent_data_providers.has_provider(&srml_timestamp::INHERENT_IDENTIFIER) {
-        inherent_data_providers
-            .register_provider(srml_timestamp::InherentDataProvider)
-            .map_err(Into::into)
-            .map_err(consensus_common::Error::InherentData)?;
-    }
+	if !inherent_data_providers.has_provider(&timestamp_primitives::INHERENT_IDENTIFIER) {
+		inherent_data_providers
+			.register_provider(timestamp_primitives::InherentDataProvider)
+			.map_err(Into::into)
+			.map_err(consensus_common::Error::InherentData)?;
+	}
 
-    if !inherent_data_providers.has_provider(&srml_anyupgrade::INHERENT_IDENTIFIER) {
-        let upgrades = BTreeMap::default();
-        // To plan a new hard fork, insert an item such as:
-        // ```
-        // 	srml_anyupgrade::Call::<kulupu_runtime::Runtime>::any(
-        //		Box::new(srml_system::Call::set_code(<wasm>).into())
-        //	).encode()
-        // ```
+	if !inherent_data_providers.has_provider(&pallet_anyupgrade::INHERENT_IDENTIFIER) {
+		let mut upgrades = BTreeMap::default();
+		// To plan a new hard fork, insert an item such as:
+		// ```
+		// 	srml_anyupgrade::Call::<kulupu_runtime::Runtime>::any(
+		//		Box::new(srml_system::Call::set_code(<wasm>).into())
+		//	).encode()
+		// ```
 
-        inherent_data_providers
-            .register_provider(srml_anyupgrade::InherentDataProvider((0, upgrades)))
-            .map_err(Into::into)
-            .map_err(consensus_common::Error::InherentData)?;
-    }
+		// Slag Ravine hard fork at block 100,000.
+		upgrades.insert(
+			100000,
+			pallet_anyupgrade::Call::<kulupu_runtime::Runtime>::any(
+				Box::new(frame_system::Call::set_code(
+					include_bytes!("../res/1-slag-ravine/kulupu_runtime.compact.wasm").to_vec()
+				).into())
+			).encode()
+		);
 
-    if let Some(author) = author {
-        if !inherent_data_providers.has_provider(&srml_rewards::INHERENT_IDENTIFIER) {
-            inherent_data_providers
-                .register_provider(srml_rewards::InherentDataProvider(
-                    AccountId::from_h256(
-                        H256::from_str(if author.starts_with("0x") {
-                            &author[2..]
-                        } else {
-                            author
-                        })
-                        .expect("Invalid author account"),
-                    )
-                    .encode(),
-                ))
-                .map_err(Into::into)
-                .map_err(consensus_common::Error::InherentData)?;
-        }
-    }
+		inherent_data_providers
+			.register_provider(pallet_anyupgrade::InherentDataProvider((0, upgrades)))
+			.map_err(Into::into)
+			.map_err(consensus_common::Error::InherentData)?;
+	}
+
+	if let Some(author) = author {
+		if !inherent_data_providers.has_provider(&pallet_rewards::INHERENT_IDENTIFIER) {
+			inherent_data_providers
+				.register_provider(pallet_rewards::InherentDataProvider(
+					AccountId::from_h256(H256::from_str(if author.starts_with("0x") {
+						&author[2..]
+					} else {
+						author
+					}).expect("Invalid author account")).encode()
+				))
+				.map_err(Into::into)
+				.map_err(consensus_common::Error::InherentData)?;
+		}
+	}
 
     Ok(inherent_data_providers)
 }

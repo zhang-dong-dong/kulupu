@@ -1,13 +1,16 @@
 use crate::chain_spec;
 use crate::service;
-use futures::{future, sync::oneshot, Future};
-use log::info;
+use futures::{future::{select, Map}, FutureExt, TryFutureExt, channel::oneshot, compat::Future01CompatExt};
 use std::cell::RefCell;
-use structopt::StructOpt;
-pub use substrate_cli::{error, IntoExit, VersionInfo};
-use substrate_cli::{impl_augment_clap, informant, parse_and_prepare, NoCustom, ParseAndPrepare};
-use substrate_service::{AbstractService, Roles as ServiceRoles};
+use std::path::PathBuf;
+use std::fs::File;
+use std::io::Write;
 use tokio::runtime::Runtime;
+pub use substrate_cli::{VersionInfo, IntoExit, error};
+use substrate_cli::{display_role, informant, parse_and_prepare, impl_augment_clap, ParseAndPrepare, NoCustom};
+use substrate_service::{AbstractService, Roles as ServiceRoles, Configuration};
+use log::info;
+use structopt::StructOpt;
 
 #[derive(Debug, StructOpt, Clone)]
 pub struct CustomArgs {
@@ -23,6 +26,22 @@ pub struct CustomArgs {
 
 impl_augment_clap!(CustomArgs);
 
+#[derive(Debug, StructOpt, Clone)]
+pub enum CustomCommands {
+	#[structopt(name = "export-builtin-wasm", setting = structopt::clap::AppSettings::Hidden)]
+	ExportBuiltinWasm(ExportBuiltinWasmCommand),
+}
+
+impl substrate_cli::GetLogFilter for CustomCommands {
+	fn get_log_filter(&self) -> Option<String> { None }
+}
+
+#[derive(Debug, StructOpt, Clone)]
+pub struct ExportBuiltinWasmCommand {
+	#[structopt()]
+	folder: String,
+}
+
 /// Parse command line arguments into service configuration.
 pub fn run<I, T, E>(args: I, exit: E, version: VersionInfo) -> error::Result<()>
 where
@@ -30,9 +49,10 @@ where
     T: Into<std::ffi::OsString> + Clone,
     E: IntoExit,
 {
+    type Config<T> = Configuration<(), T>;
     match parse_and_prepare::<NoCustom, CustomArgs, _>(&version, "kulupu-substrate", args) {
         ParseAndPrepare::Run(cmd) => {
-            cmd.run::<(), _, _, _, _, _>(load_spec, exit, |exit, _cli_args, custom_args, config| {
+            cmd.run(load_spec, exit, |exit, _cli_args, custom_args, config: Config<_>| {
                 info!("{}", version.name);
                 info!("  version {}", config.full_version());
                 info!("  by {}, 2017, 2018", version.author);
@@ -64,7 +84,7 @@ where
                 .map_err(|e| format!("{:?}", e))
             })
         }
-        ParseAndPrepare::BuildSpec(cmd) => cmd.run(load_spec),
+        ParseAndPrepare::BuildSpec(cmd) => cmd.run::<NoCustom, _, _, _>(load_spec),
 //        ParseAndPrepare::ExportBlocks(cmd) => cmd.run_with_builder::<(), _, _, _, _, _, _>(
 //            |config| Ok(new_full_start!(config, None).0),
 //            load_spec,
@@ -99,28 +119,38 @@ where
     T: AbstractService,
     E: IntoExit,
 {
-    let (exit_send, exit) = exit_future::signal();
+	let (exit_send, exit) = oneshot::channel();
 
-    let informant = informant::build(&service);
-    runtime.executor().spawn(exit.until(informant).map(|_| ()));
+	let informant = informant::build(&service);
 
-    // we eagerly drop the service so that the internal exit future is fired,
-    // but we need to keep holding a reference to the global telemetry guard
-    let _telemetry = service.telemetry();
+	let future = select(exit, informant)
+		.map(|_| Ok(()))
+		.compat();
 
-    let service_res = {
-        let exit = e
-            .into_exit()
-            .map_err(|_| error::Error::Other("Exit future failed.".into()));
-        let service = service.map_err(|err| error::Error::Service(err));
-        let select = service.select(exit).map(|_| ()).map_err(|(err, _)| err);
-        runtime.block_on(select)
-    };
+	runtime.executor().spawn(future);
 
-    exit_send.fire();
+	// we eagerly drop the service so that the internal exit future is fired,
+	// but we need to keep holding a reference to the global telemetry guard
+	let _telemetry = service.telemetry();
 
-    // TODO [andre]: timeout this future #1318
-    let _ = runtime.shutdown_on_idle().wait();
+	let service_res = {
+		let exit = e.into_exit();
+		let service = service
+			.map_err(|err| error::Error::Service(err))
+			.compat();
+		let select = select(service, exit)
+			.map(|_| Ok(()))
+			.compat();
+		runtime.block_on(select)
+	};
+
+	let _ = exit_send.send(());
+
+	// TODO [andre]: timeout this future #1318
+
+	use futures01::Future;
+
+	let _ = runtime.shutdown_on_idle().wait();
 
     service_res
 }
@@ -128,10 +158,10 @@ where
 // handles ctrl-c
 pub struct Exit;
 impl IntoExit for Exit {
-    type Exit = future::MapErr<oneshot::Receiver<()>, fn(oneshot::Canceled) -> ()>;
-    fn into_exit(self) -> Self::Exit {
-        // can't use signal directly here because CtrlC takes only `Fn`.
-        let (exit_send, exit) = oneshot::channel();
+	type Exit = Map<oneshot::Receiver<()>, fn(Result<(), oneshot::Canceled>) -> ()>;
+	fn into_exit(self) -> Self::Exit {
+		// can't use signal directly here because CtrlC takes only `Fn`.
+		let (exit_send, exit) = oneshot::channel();
 
         let exit_send_cell = RefCell::new(Some(exit_send));
         ctrlc::set_handler(move || {
@@ -145,6 +175,6 @@ impl IntoExit for Exit {
         })
         .expect("Error setting Ctrl-C handler");
 
-        exit.map_err(drop)
-    }
+		exit.map(drop)
+	}
 }

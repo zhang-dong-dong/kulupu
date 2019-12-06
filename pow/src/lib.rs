@@ -1,6 +1,6 @@
-use client::{backend::AuxStore, blockchain::HeaderBackend};
 use codec::{Decode, Encode};
-use consensus_pow::PowAlgorithm;
+use std::cell::RefCell;
+use consensus_pow::{Error, PowAlgorithm};
 use consensus_pow_primitives::{DifficultyApi, Seal as RawSeal};
 use kulupu_primitives::{AlgorithmApi, Difficulty, DAY_HEIGHT, HOUR_HEIGHT};
 use log::*;
@@ -11,10 +11,10 @@ use sr_primitives::generic::BlockId;
 use sr_primitives::traits::{
     Block as BlockT, Header as HeaderT, ProvideRuntimeApi, UniqueSaturatedInto,
 };
-use std::cell::RefCell;
 use std::time::Duration;
 use std::sync::{Arc, Mutex, mpsc::{Sender, Receiver}};
 use serde::Serialize;
+use client_api::{blockchain::HeaderBackend, backend::AuxStore};
 
 #[derive(Clone, PartialEq, Eq, Encode, Decode, Debug)]
 pub struct Seal {
@@ -83,32 +83,40 @@ fn is_valid_hash(hash: &H256, difficulty: Difficulty) -> bool {
     !overflowed
 }
 
-fn key_hash<B, C>(client: &C, parent: &BlockId<B>) -> Result<H256, String>
-where
-    B: BlockT<Hash = H256>,
-    C: HeaderBackend<B>,
+fn key_hash<B, C>(
+	client: &C,
+	parent: &BlockId<B>
+) -> Result<H256, consensus_pow::Error<B>> where
+	B: BlockT<Hash=H256>,
+	C: HeaderBackend<B>,
 {
     const PERIOD: u64 = 2 * DAY_HEIGHT;
     const OFFSET: u64 = 2 * HOUR_HEIGHT;
 
-    let parent_header = client
-        .header(parent.clone())
-        .map_err(|e| format!("Client execution error: {:?}", e))?
-        .ok_or("Parent header not found")?;
-    let parent_number = UniqueSaturatedInto::<u64>::unique_saturated_into(*parent_header.number());
+	let parent_header = client.header(parent.clone())
+		.map_err(|e| consensus_pow::Error::Environment(
+			format!("Client execution error: {:?}", e)
+		))?
+		.ok_or(consensus_pow::Error::Environment(
+			"Parent header not found".to_string()
+		))?;
+	let parent_number = UniqueSaturatedInto::<u64>::unique_saturated_into(*parent_header.number());
 
     let mut key_number = parent_number.saturating_sub(parent_number % PERIOD);
     if parent_number.saturating_sub(key_number) < OFFSET {
         key_number = key_number.saturating_sub(PERIOD);
     }
 
-    let mut current = parent_header;
-    while UniqueSaturatedInto::<u64>::unique_saturated_into(*current.number()) != key_number {
-        current = client
-            .header(BlockId::Hash(*current.parent_hash()))
-            .map_err(|e| format!("Client execution error: {:?}", e))?
-            .ok_or(format!("Block with hash {:?} not found", current.hash()))?;
-    }
+	let mut current = parent_header;
+	while UniqueSaturatedInto::<u64>::unique_saturated_into(*current.number()) != key_number {
+		current = client.header(BlockId::Hash(*current.parent_hash()))
+			.map_err(|e| consensus_pow::Error::Environment(
+				format!("Client execution error: {:?}", e)
+			))?
+			.ok_or(consensus_pow::Error::Environment(
+				format!("Block with hash {:?} not found", current.hash())
+			))?;
+	}
 
     Ok(current.hash())
 }
@@ -132,31 +140,28 @@ where
 {
     type Difficulty = Difficulty;
 
-    fn difficulty(&self, parent: &BlockId<B>) -> Result<Difficulty, String> {
-        let difficulty = self
-            .client
-            .runtime_api()
-            .difficulty(parent)
-            .map_err(|e| format!("Fetching difficulty from runtime failed: {:?}", e));
+	fn difficulty(&self, parent: &BlockId<B>) -> Result<Difficulty, consensus_pow::Error<B>> {
+		let difficulty = self.client.runtime_api().difficulty(parent)
+			.map_err(|e| consensus_pow::Error::Environment(
+				format!("Fetching difficulty from runtime failed: {:?}", e)
+			));
 
         info!("Next block's difficulty: {:?}", difficulty);
         difficulty
     }
 
-    fn verify(
-        &self,
-        parent: &BlockId<B>,
-        pre_hash: &H256,
-        seal: &RawSeal,
-        difficulty: Difficulty,
-    ) -> Result<bool, String> {
-        assert_eq!(
-            self.client
-                .runtime_api()
-                .identifier(parent)
-                .map_err(|e| format!("Fetching identifier from runtime failed: {:?}", e))?,
-            kulupu_primitives::ALGORITHM_IDENTIFIER
-        );
+	fn verify(
+		&self,
+		parent: &BlockId<B>,
+		pre_hash: &H256,
+		seal: &RawSeal,
+		difficulty: Difficulty,
+	) -> Result<bool, consensus_pow::Error<B>> {
+		assert_eq!(self.client.runtime_api().identifier(parent)
+				   .map_err(|e| consensus_pow::Error::Environment(
+					   format!("Fetching identifier from runtime failed: {:?}", e))
+				   )?,
+				   kulupu_primitives::ALGORITHM_IDENTIFIER);
 
         let key_hash = key_hash(self.client.as_ref(), parent)?;
 
@@ -189,9 +194,7 @@ where
         pre_hash: &H256,
         difficulty: Difficulty,
         round: u32,
-    ) -> Result<Option<RawSeal>, String> {
-        let _rng = SmallRng::from_rng(&mut thread_rng())
-            .map_err(|e| format!("Initialize RNG failed for mining: {:?}", e))?;
+    ) -> Result<Option<RawSeal>, Error<B>> {
         let key_hash = key_hash(self.client.as_ref(), parent)?;
         let params = MineParams {
             keyhash: key_hash,
@@ -212,10 +215,9 @@ where
                 }
             }
             Err(e) => {
-                return Err(e.to_string())
+                return Ok(None)
             }
         }
-
         loop {
             let result = self.rx2.lock().unwrap().recv_timeout(Duration::from_secs(1000));
             match result {
